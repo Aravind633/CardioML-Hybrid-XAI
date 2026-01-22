@@ -1,0 +1,7 @@
+*.csv
+models/*.h5
+models/*.pkl
+data/
+
+__pycache__/
+*.pyc
