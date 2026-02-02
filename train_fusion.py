@@ -1,93 +1,135 @@
+
+
 import pandas as pd
 import numpy as np
-import pickle
-from sklearn.model_selection import train_test_split, cross_val_score
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier, VotingClassifier
-from sklearn.preprocessing import LabelEncoder, StandardScaler
-from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 
-try:
-    df = pd.read_csv('data/REAL_MEDICAL_DATA.csv')
-except FileNotFoundError:
-    df = pd.read_csv('REAL_MEDICAL_DATA.csv')
+from sklearn.model_selection import (
+    train_test_split,
+    RepeatedStratifiedKFold,
+    cross_val_score
+)
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
 
-print(f"Loaded {len(df)} samples.")
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier, StackingClassifier
+from sklearn.metrics import accuracy_score, classification_report, roc_auc_score
 
-def simulate_noisy_ecg(row):
-    target = row['Heart Disease']
- 
-    if np.random.random() < 0.10:
-        
-        if target == 1: return np.random.uniform(0.1, 0.45)
-        else: return np.random.uniform(0.55, 0.9)
-    
+from xgboost import XGBClassifier
 
-    if target == 1: return np.random.uniform(0.6, 0.99)
-    else: return np.random.uniform(0.0, 0.4)
+columns = [
+    "age", "sex", "cp", "trestbps", "chol", "fbs",
+    "restecg", "thalach", "exang", "oldpeak",
+    "slope", "ca", "thal", "target"
+]
 
-df['ECG_Risk_Score'] = df.apply(simulate_noisy_ecg, axis=1)
+df = pd.read_csv(
+    "data/processed.cleveland.data",
+    names=columns
+)
 
-label_encoders = {}
-categorical_cols = ['Gender', 'Family History', 'Chest Pain Type', 'Exercise Induced Angina', 'Smoking']
+print("Initial shape:", df.shape)
 
-for col in categorical_cols:
-    le = LabelEncoder()
-    df[col] = le.fit_transform(df[col])
-    label_encoders[col] = le
+df["target"] = df["target"].apply(lambda x: 0 if x == 0 else 1)
 
-X = df.drop(columns=['Heart Disease'])
-y = df['Heart Disease']
-feature_names = X.columns.tolist()
+#  Handling missing values represented by "?"
+df = df.replace("?", np.nan)
+df = df.dropna()
+df = df.astype(float)
+
+print("Shape after cleaning:", df.shape)
+
+# Taget split
+X = df.drop(columns=["target"])
+y = df["target"]
+
+categorical_features = [
+    "sex", "cp", "fbs", "restecg", "exang", "slope", "thal"
+]
+
+numerical_features = [
+    "age", "trestbps", "chol", "thalach", "oldpeak", "ca"
+]
+
+preprocessor = ColumnTransformer(
+    transformers=[
+        ("cat", OneHotEncoder(handle_unknown="ignore"), categorical_features),
+        ("num", "passthrough", numerical_features)
+    ]
+)
 
 X_train, X_test, y_train, y_test = train_test_split(
-    X, y, test_size=0.2, random_state=42, stratify=y
+    X,
+    y,
+    test_size=0.2,
+    stratify=y,
+    random_state=42
 )
 
-scaler = StandardScaler()
-X_train_scaled = scaler.fit_transform(X_train)
-X_test_scaled = scaler.transform(X_test)
-
-
+# Base models
 rf = RandomForestClassifier(
-    n_estimators=200, 
-    max_depth=8,       
-    min_samples_split=10, 
+    n_estimators=500,
+    max_depth=12,
+    min_samples_leaf=3,
+    random_state=42,
+    n_jobs=-1
+)
+
+xgb = XGBClassifier(
+    n_estimators=400,
+    max_depth=5,
+    learning_rate=0.05,
+    subsample=0.9,
+    colsample_bytree=0.9,
+    eval_metric="logloss",
     random_state=42
 )
 
-gb = GradientBoostingClassifier(
-    n_estimators=100, 
-    learning_rate=0.05, 
-    max_depth=4, 
-    subsample=0.8,      
-    random_state=42
+# Stacking Classifier
+stack_model = StackingClassifier(
+    estimators=[
+        ("rf", rf),
+        ("xgb", xgb)
+    ],
+    final_estimator=LogisticRegression(max_iter=2000),
+    cv=5,
+    n_jobs=-1
 )
 
-model = VotingClassifier(estimators=[('rf', rf), ('gb', gb)], voting='soft')
-model.fit(X_train_scaled, y_train)
 
-y_pred = model.predict(X_test_scaled)
-acc = accuracy_score(y_test, y_pred)
+model = Pipeline([
+    ("preprocessor", preprocessor),
+    ("classifier", stack_model)
+])
 
-print("\n" + "="*30)
-print(f"FINAL ACCURACY: {acc*100:.2f}%")
-print("="*30)
-print("Classification Report:\n")
+
+model.fit(X_train, y_train)
+
+y_pred = model.predict(X_test)
+y_prob = model.predict_proba(X_test)[:, 1]
+
+print("\nHOLD-OUT TEST RESULTS")
+print("Accuracy:", round(accuracy_score(y_test, y_pred) * 100, 2), "%")
+print("ROC-AUC:", round(roc_auc_score(y_test, y_prob), 3))
+print("\nClassification Report:\n")
 print(classification_report(y_test, y_pred))
 
-cv_scores = cross_val_score(model, X_train_scaled, y_train, cv=5)
-print(f"Cross-Validation Average: {cv_scores.mean()*100:.2f}% (Variance: {cv_scores.std()*100:.2f}%)")
+rskf = RepeatedStratifiedKFold(
+    n_splits=5,
+    n_repeats=5,
+    random_state=42
+)
 
-if abs(acc - cv_scores.mean()) > 0.05:
-    print("WARNING: Possible Overfitting detected.")
-else:
-    print("Model is Robust (Test score matches CV score).")
+auc_scores = cross_val_score(
+    model,
+    X,
+    y,
+    cv=rskf,
+    scoring="roc_auc",
+    n_jobs=-1
+)
 
-with open('models/fusion_model.pkl', 'wb') as f:
-    pickle.dump({'model': model, 'features': feature_names}, f)
-with open('models/encoders.pkl', 'wb') as f:
-    pickle.dump(label_encoders, f)
-with open('models/scaler.pkl', 'wb') as f:
-    pickle.dump(scaler, f)
-
-print("Models Saved Successfully.")
+print("\nREPEATED STRATIFIED CV ROC-AUC RESULTS")
+print("Mean ROC-AUC:", round(auc_scores.mean(), 3))
+print("Std ROC-AUC:", round(auc_scores.std(), 3))

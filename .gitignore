@@ -6,3 +6,4 @@ data/
 __pycache__/
 *.pyc
 generate_dataset.py
+processed.cleveland.data
