@@ -1,213 +1,145 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import pickle
-import tensorflow as tf
-import shap
-import matplotlib.pyplot as plt
+import joblib
+import os
+import sys
 
-st.set_page_config(page_title="CardioML Fusion", layout="wide")
+# ---------------------------------------
+# PATH FIX
+# ---------------------------------------
+sys.path.append(os.path.abspath("models"))
+from ecg_inference import get_ecg_risk_score
+
+# ---------------------------------------
+# PAGE CONFIG
+# ---------------------------------------
+st.set_page_config(
+    page_title="CardioML – Explainable ECG-Aware Risk Prediction",
+    page_icon="❤️",
+    layout="centered"
+)
+
+# ---------------------------------------
+# LOAD MODELS
+# ---------------------------------------
+@st.cache_resource
+def load_pipeline():
+    return joblib.load("models/fusion_pipeline.pkl")
 
 @st.cache_resource
-def load_system():
-    # Load Deep Learning Model
-    ecg_model = tf.keras.models.load_model('models/ecg_lstm_model.h5')
-    
-    # Load ML Artifacts
-    with open('models/fusion_model.pkl', 'rb') as f:
-        artifact = pickle.load(f)
-        fusion_model = artifact['model']
-        feature_names = artifact['features']
-        
-    with open('models/encoders.pkl', 'rb') as f:
-        encoders = pickle.load(f)
-    with open('models/scaler.pkl', 'rb') as f:
-        scaler = pickle.load(f)
-        
-    return ecg_model, fusion_model, encoders, scaler, feature_names
+def load_shap():
+    obj = joblib.load("models/shap_explainer.pkl")
+    return obj["explainer"], obj["preprocessor"], obj["feature_names"]
 
-try:
-    ecg_model, fusion_model, encoders, scaler, feature_names = load_system()
-except Exception as e:
-    st.error(f"System Load Error: {e}")
-    st.stop()
+fusion_model = load_pipeline()
+shap_explainer, shap_preprocessor, shap_features = load_shap()
 
+# ---------------------------------------
+# HEADER
+# ---------------------------------------
+st.markdown(
+    "<h1 style='text-align:center;'>❤️ CardioML</h1>"
+    "<h4 style='text-align:center;'>Explainable ECG-Aware Heart Disease Prediction</h4><hr>",
+    unsafe_allow_html=True
+)
 
-st.title("🫀 CardioML: Multi-Modal Fusion System")
+# ---------------------------------------
+# ECG INPUT
+# ---------------------------------------
+st.subheader("📈 ECG Signal Input")
 
-col1, col2 = st.columns([1, 1])
+ecg_file = st.file_uploader(
+    "Upload single ECG beat (.csv, 187 values)",
+    type=["csv"]
+)
 
-with col1:
-    st.subheader("1. Temporal Signal Analysis (ECG)")
-    uploaded_file = st.file_uploader("Upload ECG CSV (1-Lead)", type=["csv"])
-    
-    
-    ecg_risk_score = 0.1 
-    
-    if uploaded_file:
-        try:
-            df_ecg = pd.read_csv(uploaded_file, header=None)
-            signal = df_ecg.iloc[0, :187].values.astype(float)
-            st.line_chart(signal)
-            
-            # Predict using LSTM
-            signal_reshaped = signal.reshape(1, 187, 1)
-            probs = ecg_model.predict(signal_reshaped)[0]
-            
-          
-            ecg_risk_score = float(np.sum(probs[1:])) 
-            st.metric("Deep Learning Signal Score", f"{ecg_risk_score:.2f}")
-            
-        except Exception as e:
-            st.error(f"Error processing ECG: {e}")
+ecg_score = None
 
-with col2:
-    st.subheader("2. Clinical Data")
-    age = st.number_input("Age", 20, 100, 55)
-    gender = st.selectbox("Gender", ["Male", "Female"])
-    bp = st.number_input("Resting BP", 90, 200, 140)
-    chol = st.number_input("Cholesterol", 120, 500, 240)
-    cp_type = st.selectbox("Chest Pain Type", ['Typical Angina', 'Atypical Angina', 'Non-Anginal Pain', 'Asymptomatic'])
-    ex_angina = st.selectbox("Exercise Angina", ["No", "Yes"])
-    smoking = st.selectbox("Smoker", ["No", "Yes"])
-    activity = st.slider("Physical Activity (hr/wk)", 0.0, 10.0, 1.0)
-    family = st.selectbox("Family History", ["No", "Yes"])
-
-if st.button("Analyze Combined Risk", type="primary"):
-   
-    input_data = {
-        'Age': age, 'Gender': gender, 'Family History': family,
-        'Resting BP': bp, 'Cholesterol': chol, 'Chest Pain Type': cp_type,
-        'Exercise Induced Angina': ex_angina, 'Smoking': smoking,
-        'Physical Activity (hr/wk)': activity,
-        'ECG_Risk_Score': ecg_risk_score 
-    }
-    
-    df_in = pd.DataFrame([input_data])
-    
-    
-    for col, le in encoders.items():
-        if col in df_in.columns:
-            val = df_in[col].iloc[0]
-          
-            df_in[col] = le.transform([val]) if val in le.classes_ else 0
-            
-    
-    df_in = df_in[feature_names]
-    X_scaled = scaler.transform(df_in)
-    
- 
-    prob_array = fusion_model.predict_proba(X_scaled)
-    prob = float(prob_array[0][1]) 
-    
-    st.divider()
-    
-    
-    st.markdown(f"### Final Integrated Risk: {prob:.1%}")
-    if prob > 0.5:
-        st.error("⚠️ HIGH RISK DETECTED")
+if ecg_file:
+    ecg = pd.read_csv(ecg_file, header=None).values.flatten()
+    if len(ecg) != 187:
+        st.error("ECG must have exactly 187 values.")
     else:
-        st.success("✅ LOW RISK PROFILE")
+        ecg_score = get_ecg_risk_score(ecg)
+        st.success(f"ECG Signal Risk Score: {ecg_score:.3f}")
+
+# ---------------------------------------
+# CLINICAL INPUT
+# ---------------------------------------
+st.markdown("---")
+st.subheader("🧑‍⚕️ Clinical Information")
+
+with st.form("clinical_form"):
+    age = st.number_input("Age", 20, 100, 50)
+    sex = st.selectbox("Sex", ["Male", "Female"])
+    cp = st.selectbox("Chest Pain Type", [0, 1, 2, 3])
+    trestbps = st.number_input("Resting BP", 80, 200, 120)
+    chol = st.number_input("Cholesterol", 100, 400, 200)
+    fbs = st.selectbox("Fasting Blood Sugar", [0, 1])
+    restecg = st.selectbox("Rest ECG", [0, 1, 2])
+    thalach = st.number_input("Max Heart Rate", 60, 220, 150)
+    exang = st.selectbox("Exercise Angina", [0, 1])
+    oldpeak = st.number_input("Oldpeak", 0.0, 6.0, 1.0)
+    slope = st.selectbox("Slope", [0, 1, 2])
+    ca = st.selectbox("Major Vessels", [0, 1, 2, 3])
+    thal = st.selectbox("Thal", [3, 6, 7])
+
+    submit = st.form_submit_button("🔍 Predict Risk")
+
+# ---------------------------------------
+# PREDICTION + SHAP
+# ---------------------------------------
+if submit and ecg_score is not None:
+
+    input_df = pd.DataFrame([{
+        "age": age,
+        "sex": 1.0 if sex == "Male" else 0.0,
+        "cp": cp,
+        "trestbps": trestbps,
+        "chol": chol,
+        "fbs": fbs,
+        "restecg": restecg,
+        "thalach": thalach,
+        "exang": exang,
+        "oldpeak": oldpeak,
+        "slope": slope,
+        "ca": ca,
+        "thal": thal
+    }])
+
+    prob = fusion_model.predict_proba(input_df)[0][1]
+
+    st.markdown("---")
+    st.subheader("📊 Prediction Result")
+
+    if prob >= 0.5:
+        st.error(f"⚠️ High Risk (Probability: {prob:.2f})")
+    else:
+        st.success(f"✅ Low Risk (Probability: {prob:.2f})")
+
+    # ---------------------------------------
+    # SHAP EXPLANATION
+    # ---------------------------------------
+    st.markdown("### 🔍 Why this prediction? (Explainable AI)")
+
+    X_trans = shap_preprocessor.transform(input_df)
+    shap_vals = shap_explainer.shap_values(X_trans)
+
+    shap_values_patient = shap_vals[1][0] if isinstance(shap_vals, list) else shap_vals[0]
+
+    shap_df = pd.DataFrame({
+        "Feature": shap_features,
+        "Impact": shap_values_patient
+    }).sort_values(by="Impact", key=abs, ascending=False)
+
+    st.dataframe(shap_df.head(6), use_container_width=True)
+
+    st.markdown("#### 🧠 Clinical Interpretation")
+    for _, row in shap_df.head(3).iterrows():
+        direction = "increases" if row["Impact"] > 0 else "reduces"
+        st.write(f"- **{row['Feature']}** {direction} the predicted risk.")
 
 
-    st.subheader("3. XAI: Patient-Specific Explanation")
-    
-    try:
-       
-        rf_model = fusion_model.estimators_[0] 
-        explainer = shap.TreeExplainer(rf_model)
-        
 
-        shap_values = explainer.shap_values(X_scaled)
-        
-        #
-        if isinstance(shap_values, list):
-            vals = shap_values[1] 
-        else:
-            if len(shap_values.shape) == 3: 
-                vals = shap_values[:,:,1] 
-            else:
-                vals = shap_values
 
-        vals = np.array(vals).flatten()
-        vals = [float(v) for v in vals] 
-        
-       
-        base_value = explainer.expected_value
-        if isinstance(base_value, (list, np.ndarray)):
-            base_value = base_value[1]
-
-        readable_map = {
-            'ECG_Risk_Score': 'detected ECG irregularities',
-            'Age': 'patient age',
-            'Resting BP': 'elevated blood pressure',
-            'Cholesterol': 'high cholesterol levels',
-            'Chest Pain Type': 'reported chest pain symptoms',
-            'Smoking': 'smoking history',
-            'Family History': 'family history of heart disease',
-            'Physical Activity (hr/wk)': 'lack of physical activity',
-            'Exercise Induced Angina': 'exercise-induced angina'
-        }
-        
-        # Pair features with their SHAP impact
-        feature_impacts = list(zip(feature_names, vals))
-        
-       
-        feature_impacts.sort(key=lambda x: abs(x[1]), reverse=True)
-        
-        
-        if prob > 0.5:
-            
-            drivers = [f for f, v in feature_impacts if v > 0]
-            status_text = "Risk is High"
-            intro_phrase = "Key contributing factors include"
-        else:
-            
-            drivers = [f for f, v in feature_impacts if v < 0]
-            status_text = "Risk is Low"
-            intro_phrase = "Protective factors observed include"
-            
-           
-            readable_map['Physical Activity (hr/wk)'] = 'healthy physical activity levels'
-            readable_map['Resting BP'] = 'normal blood pressure'
-            readable_map['Cholesterol'] = 'controlled cholesterol'
-
-        
-        top_factors = drivers[:3] 
-        human_names = [readable_map.get(f, f) for f in top_factors]
-        
-        
-        if len(human_names) > 0:
-            if len(human_names) == 1:
-                factors_str = human_names[0]
-            elif len(human_names) == 2:
-                factors_str = f"{human_names[0]} and {human_names[1]}"
-            else:
-                factors_str = ", ".join(human_names[:-1]) + ", and " + human_names[-1]
-            
-            explanation = f"**{status_text}.** {intro_phrase} **{factors_str}**."
-            st.info(f"📝 **AI Clinical Analysis:** {explanation}")
-        else:
-            st.info("📝 **AI Clinical Analysis:** Risk factors are balanced with no single dominant driver.")
-
-       
-        plt.clf()
-        
-       
-        shap.force_plot(
-            base_value, 
-            np.array(vals), 
-            df_in.iloc[0].values, 
-            feature_names=feature_names, 
-            matplotlib=True, 
-            show=False,
-            figsize=(20, 3) 
-        )
-   
-        fig = plt.gcf()
-        
-       
-        st.pyplot(fig, bbox_inches='tight', dpi=300)
-        
-    except Exception as e:
-        st.warning(f"XAI Error: {e}")
